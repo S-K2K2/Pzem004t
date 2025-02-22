@@ -1,0 +1,327 @@
+
+/*************************************************************
+  Download latest ERa library here:
+    https://github.com/eoh-jsc/era-lib/releases/latest
+    https://www.arduino.cc/reference/en/libraries/era
+    https://registry.platformio.org/libraries/eoh-ltd/ERa/installation
+
+    ERa website:                https://e-ra.io
+    ERa blog:                   https://iotasia.org
+    ERa forum:                  https://forum.eoh.io
+    Follow us:                  https://www.fb.com/EoHPlatform
+ *************************************************************/
+
+// Enable debug console
+// #define ERA_DEBUG
+
+/* Define MQTT host */
+#define DEFAULT_MQTT_HOST "mqtt1.eoh.io"
+
+// You should get Auth Token in the ERa App or ERa Dashboard
+#define ERA_AUTH_TOKEN "027120ad-4a28-418c-bdfb-ca9fa18d202c"
+
+/* Define setting button */
+// #define BUTTON_PIN              0
+
+#if defined(BUTTON_PIN)
+    // Active low (false), Active high (true)
+    #define BUTTON_INVERT       false
+    #define BUTTON_HOLD_TIMEOUT 5000UL
+
+    // This directive is used to specify whether the configuration should be erased.
+    // If it's set to true, the configuration will be erased.
+    #define ERA_ERASE_CONFIG    false
+#endif
+
+#include <Arduino.h>
+#include <ERaSimpleEsp32.hpp>
+#include<WiFi.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <EEPROM.h>
+#include <PZEM004Tv30.h>
+
+const char ssid[] = "XOM TRO BAT ON";
+const char pass[] = "dongtienthibat";
+
+// NTP
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600, 60000);  // GMT+7
+
+// EEPROM lưu dữ liệu
+#define EEPROM_SIZE 512
+#define ADDR_TODAY 0
+#define ADDR_YESTERDAY 4
+#define ADDR_THIS_MONTH 8
+#define ADDR_LAST_MONTH 12
+#define ADDR_THIS_MONTH_COST 16
+#define ADDR_LAST_MONTH_COST 20
+
+// Biến lưu điện năng
+float todayEnergy = 0;
+float yesterdayEnergy = 0;
+float thisMonthEnergy = 0;
+float lastMonthEnergy = 0;
+float thisMonthCost = 0;
+float lastMonthCost = 0;
+bool hasUpdatedToday = false;
+bool hasUpdatedMonth = false; // Để tránh cập nhật nhiều lần
+
+#define RXD2 16
+#define TXD2 17
+PZEM004Tv30 pzem(Serial2, RXD2, TXD2);
+
+WiFiClient mbTcpClient;
+
+#if defined(BUTTON_PIN)
+    #include <ERa/ERaButton.hpp>
+
+    ERaButton button;
+
+    #if ERA_VERSION_NUMBER >= ERA_VERSION_VAL(1, 2, 0)
+        static void eventButton(uint8_t pin, ButtonEventT event) {
+            if (event != ButtonEventT::BUTTON_ON_HOLD) {
+                return;
+            }
+            ERa.switchToConfig(ERA_ERASE_CONFIG);
+            (void)pin;
+        }
+    #else
+        static void eventButton(ButtonEventT event) {
+            if (event != ButtonEventT::BUTTON_ON_HOLD) {
+                return;
+            }
+            ERa.switchToConfig(ERA_ERASE_CONFIG);
+        }
+    #endif
+
+    #if defined(ESP32)
+        #include <pthread.h>
+
+        pthread_t pthreadButton;
+
+        static void* handlerButton(void* args) {
+            for (;;) {
+                button.run();
+                ERaDelay(10);
+            }
+            pthread_exit(NULL);
+        }
+
+        void initButton() {
+            pinMode(BUTTON_PIN, INPUT);
+            button.setButton(BUTTON_PIN, digitalRead, eventButton,
+                            BUTTON_INVERT).onHold(BUTTON_HOLD_TIMEOUT);
+            pthread_create(&pthreadButton, NULL, handlerButton, NULL);
+        }
+    #elif defined(ESP8266)
+        #include <Ticker.h>
+
+        Ticker ticker;
+
+        static void handlerButton() {
+            button.run();
+        }
+
+        void initButton() {
+            pinMode(BUTTON_PIN, INPUT);
+            button.setButton(BUTTON_PIN, digitalRead, eventButton,
+                            BUTTON_INVERT).onHold(BUTTON_HOLD_TIMEOUT);
+            ticker.attach_ms(100, handlerButton);
+        }
+    #elif defined(ARDUINO_AMEBA)
+        #include <GTimer.h>
+
+        const uint32_t timerIdButton {0};
+
+        static void handlerButton(uint32_t data) {
+            button.run();
+            (void)data;
+        }
+
+        void initButton() {
+            pinMode(BUTTON_PIN, INPUT);
+            button.setButton(BUTTON_PIN, digitalReadArduino, eventButton,
+                            BUTTON_INVERT).onHold(BUTTON_HOLD_TIMEOUT);
+            GTimer.begin(timerIdButton, (100 * 1000), handlerButton);
+        }
+    #endif
+#endif
+
+/* This function will run every time ERa is connected */
+ERA_CONNECTED() {
+    ERA_LOG(ERA_PSTR("ERa"), ERA_PSTR("ERa connected!"));
+}
+
+/* This function will run every time ERa is disconnected */
+ERA_DISCONNECTED() {
+    ERA_LOG(ERA_PSTR("ERa"), ERA_PSTR("ERa disconnected!"));
+}
+
+/* This function print uptime every second */
+void timerEvent() {
+
+
+    ERA_LOG(ERA_PSTR("Timer"), ERA_PSTR("Uptime: %d"), ERaMillis() / 1000L);
+}
+
+void setup() {
+    /* Setup debug console */
+#if defined(ERA_DEBUG)
+    Serial.begin(115200);
+     timeClient.begin();
+    EEPROM.begin(EEPROM_SIZE);
+    
+   // Đọc dữ liệu từ EEPROM
+    EEPROM.get(ADDR_TODAY, todayEnergy);
+    EEPROM.get(ADDR_YESTERDAY, yesterdayEnergy);
+    EEPROM.get(ADDR_THIS_MONTH, thisMonthEnergy);
+    EEPROM.get(ADDR_LAST_MONTH, lastMonthEnergy);
+    EEPROM.get(ADDR_THIS_MONTH_COST, thisMonthCost);
+    EEPROM.get(ADDR_LAST_MONTH_COST, lastMonthCost);
+
+#endif
+
+#if defined(BUTTON_PIN)
+    /* Initializing button. */
+    initButton();
+    /* Enable read/write WiFi credentials */
+    ERa.setPersistent(true);
+#endif
+
+    /* Setup Client for Modbus TCP/IP */
+    //ERa.setModbusClient(mbTcpClient);
+
+    /* Set scan WiFi. If activated, the board will scan
+       and connect to the best quality WiFi. */
+    ERa.setScanWiFi(true);
+            
+    /* Initializing the ERa library. */
+    ERa.begin(ssid, pass);
+
+    /* Setup timer called function every second */
+    ERa.addInterval(1000L, timerEvent);
+}
+
+float calculateElectricityCost(float energy) {
+    float cost = 0;
+    if (energy > 400) {
+        cost += (energy - 400) * 3.151;
+        energy = 400;
+    }
+    if (energy > 300) {
+        cost += (energy - 300) * 3.050;
+        energy = 300;
+    }
+    if (energy > 200) {
+        cost += (energy - 200) * 2.729;
+        energy = 200;
+    }
+    if (energy > 100) {
+        cost += (energy - 100) * 2.167;
+        energy = 100;
+    }
+    if (energy > 50) {
+        cost += (energy - 50) * 1.866;
+        energy = 50;
+    }
+    cost += energy * 1.806;
+    return cost;
+}
+
+void loop() {
+  timeClient.update();
+  int currentHour = timeClient.getHours();
+  int currentMinute = timeClient.getMinutes();
+EEPROM.get(ADDR_YESTERDAY, yesterdayEnergy);
+EEPROM.get(ADDR_TODAY, todayEnergy);
+EEPROM.get(ADDR_THIS_MONTH, thisMonthEnergy);
+EEPROM.get(ADDR_LAST_MONTH, lastMonthEnergy);
+
+
+thisMonthCost = calculateElectricityCost(thisMonthEnergy);
+EEPROM.put(ADDR_THIS_MONTH_COST, thisMonthCost);
+EEPROM.commit(); // Lưu lại dữ liệu vào EEPROM
+Serial.printf("Tổng tiền điện tháng này: %.2f VND\n", thisMonthCost);
+
+  float voltage = pzem.voltage();
+  float current = pzem.current();
+  float power = pzem.power();
+  float energy = pzem.energy();
+  float frequency = pzem.frequency();
+  float pf = pzem.pf();
+
+    Serial.println(voltage);
+    Serial.println(current);
+    Serial.println(power);
+    Serial.println(energy);
+    Serial.println(frequency);
+      Serial.println(pf);
+
+      if (!isnan(energy)) {
+        todayEnergy = energy;
+        thisMonthEnergy = energy;
+        Serial.printf("[ %02d:%02d] U=%.2fV, I=%.2fA, P=%.2fW, E=%.2fkWh\n",
+                      currentHour, currentMinute, voltage, current, power, todayEnergy,thisMonthEnergy);
+    } else {
+        Serial.println(" Không đọc được dữ liệu PZEM!");
+    }
+
+    if (currentHour == 11 && currentMinute == 45 && !hasUpdatedToday) {
+        yesterdayEnergy = todayEnergy;
+        EEPROM.put(ADDR_YESTERDAY, yesterdayEnergy);
+        EEPROM.commit();
+        todayEnergy = 0;
+        EEPROM.put(ADDR_TODAY, todayEnergy);
+        EEPROM.commit();
+
+        Serial.println(" Dữ liệu đã cập nhật!");
+        Serial.printf("Yesterday: %.2fkWh, Today Reset: %.2fkWh\n", yesterdayEnergy, todayEnergy);
+
+        hasUpdatedToday = true;  // Tránh cập nhật nhiều lần
+        
+    }
+
+    if (currentHour == 11 && currentMinute == 46 ){
+        hasUpdatedToday = false;
+    }
+
+if (timeClient.getDay() == 22 && currentHour == 11 && currentMinute == 48 && !hasUpdatedMonth) {
+    Serial.println("Reset dữ liệu tháng!");
+
+    // Lưu dữ liệu tháng trước vào lastMonthEnergy
+    lastMonthEnergy = thisMonthEnergy;
+    lastMonthCost = thisMonthCost;
+
+    // Reset dữ liệu tháng này
+    thisMonthEnergy = 0;
+    thisMonthCost = 0; 
+
+    // Ghi vào EEPROM
+    EEPROM.put(ADDR_LAST_MONTH, lastMonthEnergy);
+    EEPROM.put(ADDR_LAST_MONTH_COST, lastMonthCost);
+    EEPROM.put(ADDR_THIS_MONTH, thisMonthEnergy);
+    EEPROM.put(ADDR_THIS_MONTH_COST, thisMonthCost);
+    EEPROM.commit();
+
+    hasUpdatedMonth = true;
+} else if (timeClient.getDay() != 22) {
+    hasUpdatedMonth = false;  // Để reset lại biến nếu đã qua ngày 21
+}
+    ERa.virtualWrite(V0, voltage);
+    ERa.virtualWrite(V1, current);
+    ERa.virtualWrite(V2, power);
+    ERa.virtualWrite(V3, frequency);
+    ERa.virtualWrite(V4, pf);
+    ERa.virtualWrite(V5, energy);
+    
+    ERa.virtualWrite(V6, todayEnergy);
+    ERa.virtualWrite(V7, yesterdayEnergy);
+    ERa.virtualWrite(V8, thisMonthEnergy);
+    ERa.virtualWrite(V9, lastMonthEnergy);
+    ERa.virtualWrite(V10, thisMonthCost);
+    ERa.virtualWrite(V11, lastMonthCost);
+
+    delay(1000);
+    ERa.run();
+}
