@@ -260,33 +260,41 @@ Serial.printf("Tổng tiền điện tháng này: %.2f VND\n", thisMonthCost);
 
       if (!isnan(energy)) {
         todayEnergy = energy;
-        thisMonthEnergy = energy;
+        thisMonthEnergy += todayEnergy;
+        
         Serial.printf("[ %02d:%02d] U=%.2fV, I=%.2fA, P=%.2fW, E=%.2fkWh\n",
                       currentHour, currentMinute, voltage, current, power, todayEnergy,thisMonthEnergy);
     } else {
         Serial.println(" Không đọc được dữ liệu PZEM!");
     }
 
-    if (currentHour == 11 && currentMinute == 45 && !hasUpdatedToday) {
+    if (currentHour == 12 && currentMinute == 0 && !hasUpdatedToday) {
+   
         yesterdayEnergy = todayEnergy;
         EEPROM.put(ADDR_YESTERDAY, yesterdayEnergy);
         EEPROM.commit();
         todayEnergy = 0;
         EEPROM.put(ADDR_TODAY, todayEnergy);
+        EEPROM.put(ADDR_THIS_MONTH, thisMonthEnergy);
         EEPROM.commit();
 
         Serial.println(" Dữ liệu đã cập nhật!");
         Serial.printf("Yesterday: %.2fkWh, Today Reset: %.2fkWh\n", yesterdayEnergy, todayEnergy);
 
         hasUpdatedToday = true;  // Tránh cập nhật nhiều lần
-        
+        // Reset giá trị năng lượng trên cảm biến PZEM
+    pzem.resetEnergy();
+    delay(2000); // Chờ 2 giây để PZEM cập nhật lại
+
+float energy = pzem.energy();
+Serial.printf(" Sau reset: PZEM đo được %.2f kWh\n", energy);
     }
 
-    if (currentHour == 11 && currentMinute == 46 ){
+    if (currentHour == 12 && currentMinute == 1 ){
         hasUpdatedToday = false;
     }
 
-if (timeClient.getDay() == 22 && currentHour == 11 && currentMinute == 48 && !hasUpdatedMonth) {
+if (timeClient.getDay() == 22 && currentHour == 12 && currentMinute == 4 && !hasUpdatedMonth) {
     Serial.println("Reset dữ liệu tháng!");
 
     // Lưu dữ liệu tháng trước vào lastMonthEnergy
@@ -296,7 +304,7 @@ if (timeClient.getDay() == 22 && currentHour == 11 && currentMinute == 48 && !ha
     // Reset dữ liệu tháng này
     thisMonthEnergy = 0;
     thisMonthCost = 0; 
-
+    
     // Ghi vào EEPROM
     EEPROM.put(ADDR_LAST_MONTH, lastMonthEnergy);
     EEPROM.put(ADDR_LAST_MONTH_COST, lastMonthCost);
