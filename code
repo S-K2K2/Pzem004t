@@ -48,24 +48,20 @@ const char pass[] = "dongtienthibat";
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600, 60000);  // GMT+7
 
-// EEPROM lưu dữ liệu
-#define EEPROM_SIZE 512
-#define ADDR_TODAY 0
-#define ADDR_YESTERDAY 4
-#define ADDR_THIS_MONTH 8
-#define ADDR_LAST_MONTH 12
-#define ADDR_THIS_MONTH_COST 16
-#define ADDR_LAST_MONTH_COST 20
+
 
 // Biến lưu điện năng
-float todayEnergy = 0;
-float yesterdayEnergy = 0;
-float thisMonthEnergy = 0;
-float lastMonthEnergy = 0;
-float thisMonthCost = 0;
-float lastMonthCost = 0;
-bool hasUpdatedToday = false;
-bool hasUpdatedMonth = false; // Để tránh cập nhật nhiều lần
+float lastSavedEnergy ;
+float todayEnergy  ;
+float yesterdayEnergy ;
+float thisMonthEnergy  ;
+float lastMonthEnergy ;
+float thisMonthCost  ;  
+float lastMonthCost  ;
+bool hasUpdatedDaily = false;
+bool hasUpdatedMonthly = false; // Để tránh cập nhật nhiều lần
+
+float voltage, current,power,energy,frequency,pf;
 
 #define RXD2 16
 #define TXD2 17
@@ -158,8 +154,104 @@ ERA_DISCONNECTED() {
     ERA_LOG(ERA_PSTR("ERa"), ERA_PSTR("ERa disconnected!"));
 }
 
+
+void readPZEMData() {
+   voltage = pzem.voltage();
+  current = pzem.current();
+   power = pzem.power();
+  energy = pzem.energy();
+  frequency = pzem.frequency();
+  pf = pzem.pf();
+
+ Serial.println(voltage);
+ Serial.println(current);
+ Serial.println(power);
+ Serial.println(energy);
+ Serial.println(frequency);
+ Serial.println(pf);
+
+ if (!isnan(energy)) {
+  todayEnergy = energy - lastSavedEnergy;
+  
+       
+  } else {
+        Serial.println(" Không đọc được dữ liệu PZEM!");
+  }
+}
+
+void calculateEnergyUsage() {
+    timeClient.update();
+    int currentHour = timeClient.getHours();
+    int currentMinute = timeClient.getMinutes();
+    int currentDay = timeClient.getDay();
+    bool needSave = false;
+
+    // Cập nhật hàng ngày vào 22:40
+    if (currentHour == 0 && currentMinute == 47 && !hasUpdatedDaily) {
+        yesterdayEnergy = todayEnergy;
+        lastSavedEnergy = energy;
+        thisMonthEnergy += yesterdayEnergy;
+
+        
+        needSave = true;
+        hasUpdatedDaily = true;
+    }
+    if (currentHour != 0 || currentMinute != 47) {
+        hasUpdatedDaily = false;
+    }
+
+    // Cập nhật hàng tháng vào 22/2 lúc 17:42
+    if (currentDay == 23 && currentHour == 0 && currentMinute == 49 && !hasUpdatedMonthly) {
+        lastMonthEnergy = thisMonthEnergy;
+        lastMonthCost = thisMonthCost;
+        thisMonthEnergy = 0;
+        thisMonthCost = 0;
+
+        needSave = true;
+
+        hasUpdatedMonthly = true;
+    }
+    if (currentDay != 23 || currentHour != 0 || currentMinute != 49) {
+        hasUpdatedMonthly = false;
+    }
+
+    
+    thisMonthCost = calculateElectricityCost(thisMonthEnergy);
+    
+
+if (needSave) {
+        EEPROM.put(30, lastSavedEnergy);
+        EEPROM.put(40, yesterdayEnergy);
+        EEPROM.put(50, thisMonthEnergy);
+        EEPROM.put(60, lastMonthEnergy);
+        EEPROM.put(70, thisMonthCost);
+        EEPROM.put(80, lastMonthCost);
+        EEPROM.commit();
+    }
+  }
+
+
 /* This function print uptime every second */
 void timerEvent() {
+
+  readPZEMData();
+  calculateEnergyUsage();
+ 
+ ERa.virtualWrite(V0, voltage);
+ ERa.virtualWrite(V1, current);
+ ERa.virtualWrite(V2, power);
+ ERa.virtualWrite(V3, frequency);
+ ERa.virtualWrite(V4, pf);
+ ERa.virtualWrite(V5, energy);
+    
+ ERa.virtualWrite(V6, todayEnergy);
+ ERa.virtualWrite(V7, yesterdayEnergy);
+ ERa.virtualWrite(V8, thisMonthEnergy);
+ ERa.virtualWrite(V9, lastMonthEnergy);
+ ERa.virtualWrite(V10, thisMonthCost);
+ ERa.virtualWrite(V11, lastMonthCost);
+ 
+ 
 
 
     ERA_LOG(ERA_PSTR("Timer"), ERA_PSTR("Uptime: %d"), ERaMillis() / 1000L);
@@ -170,15 +262,27 @@ void setup() {
 #if defined(ERA_DEBUG)
     Serial.begin(115200);
      timeClient.begin();
-    EEPROM.begin(EEPROM_SIZE);
+    EEPROM.begin(512);
     
    // Đọc dữ liệu từ EEPROM
-    EEPROM.get(ADDR_TODAY, todayEnergy);
-    EEPROM.get(ADDR_YESTERDAY, yesterdayEnergy);
-    EEPROM.get(ADDR_THIS_MONTH, thisMonthEnergy);
-    EEPROM.get(ADDR_LAST_MONTH, lastMonthEnergy);
-    EEPROM.get(ADDR_THIS_MONTH_COST, thisMonthCost);
-    EEPROM.get(ADDR_LAST_MONTH_COST, lastMonthCost);
+   // EEPROM.get(20, todayEnergy);
+    EEPROM.get(30, lastSavedEnergy);
+    EEPROM.get(40, yesterdayEnergy);
+    EEPROM.get(50, thisMonthEnergy);
+    EEPROM.get(60, lastMonthEnergy);
+    EEPROM.get(70, thisMonthCost);
+    EEPROM.get(80, lastMonthCost);
+
+
+    // Kiểm tra giá trị hợp lệ
+    if (isnan(yesterdayEnergy) || yesterdayEnergy < 0) yesterdayEnergy = 0;
+    if (isnan(lastSavedEnergy) || lastSavedEnergy < 0) lastSavedEnergy = 0;
+    if (isnan(thisMonthEnergy) || thisMonthEnergy < 0) thisMonthEnergy = 0;
+    if (isnan(lastMonthEnergy) || lastMonthEnergy < 0) lastMonthEnergy = 0;
+    if (isnan(lastMonthCost) || lastMonthCost < 0) lastMonthCost = 0;
+    if (isnan(thisMonthCost) || thisMonthCost < 0) thisMonthCost = 0;
+
+    
 
 #endif
 
@@ -230,106 +334,9 @@ float calculateElectricityCost(float energy) {
 }
 
 void loop() {
-  timeClient.update();
-  int currentHour = timeClient.getHours();
-  int currentMinute = timeClient.getMinutes();
-EEPROM.get(ADDR_YESTERDAY, yesterdayEnergy);
-EEPROM.get(ADDR_TODAY, todayEnergy);
-EEPROM.get(ADDR_THIS_MONTH, thisMonthEnergy);
-EEPROM.get(ADDR_LAST_MONTH, lastMonthEnergy);
+  
 
+ERa.run();
 
-thisMonthCost = calculateElectricityCost(thisMonthEnergy);
-EEPROM.put(ADDR_THIS_MONTH_COST, thisMonthCost);
-EEPROM.commit(); // Lưu lại dữ liệu vào EEPROM
-Serial.printf("Tổng tiền điện tháng này: %.2f VND\n", thisMonthCost);
-
-  float voltage = pzem.voltage();
-  float current = pzem.current();
-  float power = pzem.power();
-  float energy = pzem.energy();
-  float frequency = pzem.frequency();
-  float pf = pzem.pf();
-
-    Serial.println(voltage);
-    Serial.println(current);
-    Serial.println(power);
-    Serial.println(energy);
-    Serial.println(frequency);
-      Serial.println(pf);
-
-      if (!isnan(energy)) {
-        todayEnergy = energy;
-        thisMonthEnergy += todayEnergy;
-        
-        Serial.printf("[ %02d:%02d] U=%.2fV, I=%.2fA, P=%.2fW, E=%.2fkWh\n",
-                      currentHour, currentMinute, voltage, current, power, todayEnergy,thisMonthEnergy);
-    } else {
-        Serial.println(" Không đọc được dữ liệu PZEM!");
-    }
-
-    if (currentHour == 12 && currentMinute == 0 && !hasUpdatedToday) {
-   
-        yesterdayEnergy = todayEnergy;
-        EEPROM.put(ADDR_YESTERDAY, yesterdayEnergy);
-        EEPROM.commit();
-        todayEnergy = 0;
-        EEPROM.put(ADDR_TODAY, todayEnergy);
-        EEPROM.put(ADDR_THIS_MONTH, thisMonthEnergy);
-        EEPROM.commit();
-
-        Serial.println(" Dữ liệu đã cập nhật!");
-        Serial.printf("Yesterday: %.2fkWh, Today Reset: %.2fkWh\n", yesterdayEnergy, todayEnergy);
-
-        hasUpdatedToday = true;  // Tránh cập nhật nhiều lần
-        // Reset giá trị năng lượng trên cảm biến PZEM
-    pzem.resetEnergy();
-    delay(2000); // Chờ 2 giây để PZEM cập nhật lại
-
-float energy = pzem.energy();
-Serial.printf(" Sau reset: PZEM đo được %.2f kWh\n", energy);
-    }
-
-    if (currentHour == 12 && currentMinute == 1 ){
-        hasUpdatedToday = false;
-    }
-
-if (timeClient.getDay() == 22 && currentHour == 12 && currentMinute == 4 && !hasUpdatedMonth) {
-    Serial.println("Reset dữ liệu tháng!");
-
-    // Lưu dữ liệu tháng trước vào lastMonthEnergy
-    lastMonthEnergy = thisMonthEnergy;
-    lastMonthCost = thisMonthCost;
-
-    // Reset dữ liệu tháng này
-    thisMonthEnergy = 0;
-    thisMonthCost = 0; 
-    
-    // Ghi vào EEPROM
-    EEPROM.put(ADDR_LAST_MONTH, lastMonthEnergy);
-    EEPROM.put(ADDR_LAST_MONTH_COST, lastMonthCost);
-    EEPROM.put(ADDR_THIS_MONTH, thisMonthEnergy);
-    EEPROM.put(ADDR_THIS_MONTH_COST, thisMonthCost);
-    EEPROM.commit();
-
-    hasUpdatedMonth = true;
-} else if (timeClient.getDay() != 22) {
-    hasUpdatedMonth = false;  // Để reset lại biến nếu đã qua ngày 21
-}
-    ERa.virtualWrite(V0, voltage);
-    ERa.virtualWrite(V1, current);
-    ERa.virtualWrite(V2, power);
-    ERa.virtualWrite(V3, frequency);
-    ERa.virtualWrite(V4, pf);
-    ERa.virtualWrite(V5, energy);
-    
-    ERa.virtualWrite(V6, todayEnergy);
-    ERa.virtualWrite(V7, yesterdayEnergy);
-    ERa.virtualWrite(V8, thisMonthEnergy);
-    ERa.virtualWrite(V9, lastMonthEnergy);
-    ERa.virtualWrite(V10, thisMonthCost);
-    ERa.virtualWrite(V11, lastMonthCost);
-
-    delay(1000);
-    ERa.run();
+  
 }
